@@ -54,16 +54,8 @@ python3 -m pip install paramiko
 ## Run the app
 
 ```bash
-python3 /home/cachy/Documents/Music_sync/music_sync.py
-```
-
-Or from the project folder:
-
-```bash
-cd /home/cachy/Documents/Music_sync
 python3 music_sync.py
 ```
-
 ## Notes
 
 - The app expects a valid SSH server and a writable remote music directory.
