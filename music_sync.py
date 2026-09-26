@@ -2,8 +2,8 @@
 """
 Music Folder Sync over SSH (SFTP)
 
-Copies only files whose relative paths do not already exist on the server.
-Existing remote files are never overwritten. Empty directories are not copied.
+Copies files whose relative paths do not already exist on the server by default.
+Existing remote files can optionally be overwritten. Empty directories are not copied.
 
 Install:
     python -m pip install paramiko
@@ -49,6 +49,7 @@ class MusicSyncApp:
         self.password_var = tk.StringVar()
         self.auth_var = tk.StringVar(value="key")
         self.dark_mode = tk.BooleanVar(value=False)
+        self.overwrite_var = tk.BooleanVar(value=False)
 
         self.settings_path = Path(os.environ.get("APPDATA", Path.home())) / "MusicSync" / "settings.json"
         self._load_settings()
@@ -72,6 +73,7 @@ class MusicSyncApp:
         self.key_var.set(settings.get("key", ""))
         self.auth_var.set(settings.get("auth", "key"))
         self.dark_mode.set(settings.get("dark_mode", False))
+        self.overwrite_var.set(settings.get("overwrite", False))
 
     def _save_settings(self):
         settings = {
@@ -83,6 +85,7 @@ class MusicSyncApp:
             "key": self.key_var.get(),
             "auth": self.auth_var.get(),
             "dark_mode": self.dark_mode.get(),
+            "overwrite": self.overwrite_var.get(),
         }
         try:
             self.settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -148,23 +151,44 @@ class MusicSyncApp:
             command=self._toggle_theme
         ).pack(side="left", padx=8)
 
+        ttk.Checkbutton(
+            buttons, text="Overwrite existing files", variable=self.overwrite_var,
+            command=self._toggle_overwrite
+        ).pack(side="left", padx=8)
+
+        self.overwrite_banner = tk.Label(
+            outer,
+            text="WARNING: Overwrite is enabled. Existing remote files will be replaced.",
+            background="#b00020", foreground="#ffffff", font=("TkDefaultFont", 10, "bold"),
+            padx=8, pady=6
+        )
+        self.overwrite_banner.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(0, 5))
+        self._toggle_overwrite()
+
         self.status_var = tk.StringVar(value="Choose a folder and enter your SSH details.")
         ttk.Label(outer, textvariable=self.status_var).grid(
-            row=8, column=0, columnspan=3, sticky="w", pady=(4, 4)
+            row=9, column=0, columnspan=3, sticky="w", pady=(4, 4)
         )
         self.progress = ttk.Progressbar(outer, mode="determinate", maximum=100)
-        self.progress.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        self.progress.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(0, 8))
         self.detail_var = tk.StringVar(value="Waiting to start.")
         ttk.Label(outer, textvariable=self.detail_var, wraplength=730).grid(
-            row=10, column=0, columnspan=3, sticky="w"
+            row=11, column=0, columnspan=3, sticky="w"
         )
 
         ttk.Label(outer, text="Activity log").grid(
-            row=11, column=0, columnspan=3, sticky="w", pady=(10, 3)
+            row=12, column=0, columnspan=3, sticky="w", pady=(10, 3)
         )
         self.log = tk.Text(outer, height=13, wrap="word", state="disabled")
-        self.log.grid(row=12, column=0, columnspan=3, sticky="nsew")
-        outer.rowconfigure(12, weight=1)
+        self.log.grid(row=13, column=0, columnspan=3, sticky="nsew")
+        outer.rowconfigure(13, weight=1)
+
+    def _toggle_overwrite(self):
+        if self.overwrite_var.get():
+            self.overwrite_banner.grid()
+        else:
+            self.overwrite_banner.grid_remove()
+        self._save_settings()
 
     def _apply_theme(self):
         style = ttk.Style(self.root)
@@ -291,6 +315,7 @@ class MusicSyncApp:
             "key": self.key_var.get().strip(),
             "auth": self.auth_var.get(),
             "password": self.password_var.get(),
+            "overwrite": self.overwrite_var.get(),
         }
         self.worker = threading.Thread(target=self._sync_worker, args=(config,), daemon=True)
         self.worker.start()
@@ -438,14 +463,18 @@ class MusicSyncApp:
                     except OSError as exc:
                         self.events.put(("log", f"Skipping {full}: {exc}"))
 
-            pending = [(p, rel, size) for p, rel, size in local_files if rel not in remote_files]
+            pending = [
+                (path, rel, size) for path, rel, size in local_files
+                if cfg["overwrite"] or rel not in remote_files
+            ]
             total = len(pending)
             total_bytes = sum(size for _, _, size in pending)
             self.events.put(("log", f"Local files: {len(local_files)} | Remote files: {len(remote_files)}"))
-            self.events.put(("log", f"Files to copy: {total} ({total_bytes / (1024**2):.1f} MiB)"))
+            action = "Files to copy/replace" if cfg["overwrite"] else "Files to copy"
+            self.events.put(("log", f"{action}: {total} ({total_bytes / (1024**2):.1f} MiB)"))
             if total == 0:
-                self.events.put(("progress", 100, "Everything already exists remotely. Nothing to copy."))
-                self.events.put(("done", "No new files to copy."))
+                self.events.put(("progress", 100, "No local files found to copy."))
+                self.events.put(("done", "No files to copy."))
                 sftp.close()
                 return
 
@@ -458,7 +487,7 @@ class MusicSyncApp:
                 phase = f"creating remote folder for '{rel}'"
                 self.remote_mkdirs(sftp, posixpath.dirname(remote_path))
                 self.events.put(("detail", f"{index}/{total}: {rel}"))
-                self.events.put(("log", f"Copying: {rel}"))
+                self.events.put(("log", f"{'Replacing' if cfg['overwrite'] else 'Copying'}: {rel}"))
 
                 file_bytes = [0]
                 def callback(transferred, file_total):
@@ -470,10 +499,10 @@ class MusicSyncApp:
                     self.events.put(("progress", pct,
                                     f"{index}/{total} files • {current_bytes / (1024**2):.1f}/{total_bytes / (1024**2):.1f} MiB • {speed:.2f} MiB/s"))
 
-                # Exclusive create prevents overwriting a file that appears after the scan.
                 phase = f"uploading '{rel}'"
                 try:
-                    with open(local_path, "rb") as src, sftp.file(remote_path, "x") as dst:
+                    mode = "wb" if cfg["overwrite"] else "x"
+                    with open(local_path, "rb") as src, sftp.file(remote_path, mode) as dst:
                         while True:
                             if self.cancel_event.is_set():
                                 break
@@ -484,7 +513,8 @@ class MusicSyncApp:
                             callback(file_bytes[0] + len(chunk), size)
                             file_bytes[0] += len(chunk)
                 except IOError as exc:
-                    # If the target already exists, leave it untouched.
+                    if cfg["overwrite"]:
+                        raise
                     try:
                         sftp.stat(remote_path)
                         self.events.put(("log", f"Skipped (already exists): {rel}"))
@@ -501,8 +531,9 @@ class MusicSyncApp:
             if self.cancel_event.is_set():
                 self.events.put(("done", "Sync cancelled. Files already copied were kept."))
             else:
-                self.events.put(("progress", 100, f"Finished • {total} file(s) checked for copying"))
-                self.events.put(("done", f"Sync complete. Processed {total} new file(s)."))
+                self.events.put(("progress", 100, f"Finished • {total} file(s) processed"))
+                result = "replaced/copied" if cfg["overwrite"] else "new"
+                self.events.put(("done", f"Sync complete. Processed {total} {result} file(s)."))
         except Exception as exc:
             self.events.put(("error", self._format_sync_error(exc, phase, cfg)))
         finally:
