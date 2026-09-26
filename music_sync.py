@@ -11,9 +11,9 @@ Install:
 Run:
     python music_sync.py
 """
-import os
 import errno
 import json
+import os
 import posixpath
 import queue
 import socket
